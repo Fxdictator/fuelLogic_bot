@@ -43,14 +43,14 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS records
                    fill_date TEXT)''')
 conn.commit()
 
-# --- 4. The Core Math (7-Day Active / 2-Day Blackout / Day 10 Reset) ---
+# --- 4. The Core Math (7-Day Cycle / Day 8 Reset) ---
 def get_car_state(car):
     cursor.execute("SELECT liters, fill_date FROM records WHERE car=? ORDER BY fill_date ASC", (car,))
     all_fills = cursor.fetchall()
     
     # If no history, it's completely ready for a Day 1
     if not all_fills:
-        return {"state": "READY", "fills": 0, "liters": 0.0, "active_end": None, "reset_time": None, "last_reset": None}
+        return {"state": "READY", "fills": 0, "liters": 0.0, "reset_time": None, "last_reset": None}
     
     cycle_start = None
     cycle_fills = 0
@@ -60,26 +60,23 @@ def get_car_state(car):
         fill_liters = fill[0]
         fill_date = datetime.fromisoformat(fill[1])
         
-        # Does this fill start a brand new cycle?
-        if cycle_start is None or fill_date >= (cycle_start + timedelta(days=9)):
+        # Does this fill start a brand new cycle? (7 full days after the cycle_start)
+        if cycle_start is None or fill_date >= (cycle_start + timedelta(days=7)):
             cycle_start = fill_date
             cycle_fills = 1
             cycle_liters = fill_liters
         else:
-            # It happened during the active cycle
+            # It happened during the active 7-day cycle
             cycle_fills += 1
             cycle_liters += fill_liters
             
     now = datetime.now()
-    active_end = cycle_start + timedelta(days=7) # 7-Day Active Window ends
-    reset_time = cycle_start + timedelta(days=9) # Full 9-day lock ends, resets on Day 10
+    reset_time = cycle_start + timedelta(days=7) # The exact moment the 7-day window closes
     
     if now >= reset_time:
-        return {"state": "READY", "fills": 0, "liters": 0.0, "active_end": None, "reset_time": None, "last_reset": reset_time}
-    elif now >= active_end:
-        return {"state": "BLACKOUT", "fills": cycle_fills, "liters": cycle_liters, "active_end": active_end, "reset_time": reset_time, "last_reset": None}
+        return {"state": "READY", "fills": 0, "liters": 0.0, "reset_time": None, "last_reset": reset_time}
     else:
-        return {"state": "ACTIVE", "fills": cycle_fills, "liters": cycle_liters, "active_end": active_end, "reset_time": reset_time, "last_reset": None}
+        return {"state": "ACTIVE", "fills": cycle_fills, "liters": cycle_liters, "reset_time": reset_time, "last_reset": None}
 
 # --- 5. The Smart Dispatcher (APScheduler) ---
 def weekly_backup():
@@ -105,17 +102,17 @@ def daily_smart_check():
         
         # 1. The 24-Hour Warning (Window is closing soon!)
         if state["state"] == "ACTIVE":
-            if now < state["active_end"] <= tomorrow:
+            if now < state["reset_time"] <= tomorrow:
                 fills_left = 2 - state["fills"]
                 liters_left = max_liters - state["liters"]
                 if fills_left > 0 and liters_left > 0:
-                    msg = f"⚠️ *Fuel Reminder:* {car}'s 7-Day Active Window closes tomorrow!\n\nYou have {fills_left} fill(s) and {liters_left}L left before the 2-day blackout begins."
+                    msg = f"⚠️ *Fuel Reminder:* {car}'s 7-Day Cycle resets tomorrow!\n\nYou still have {fills_left} fill(s) and {liters_left}L left to claim."
                     bot.send_message(GROUP_CHAT_ID, msg, parse_mode='Markdown')
         
-        # 2. The Reset Announcement (It just cleared the blackout!)
+        # 2. The Reset Announcement (It just cleared the cycle!)
         elif state["state"] == "READY" and state["last_reset"]:
             if yesterday < state["last_reset"] <= now:
-                msg = f"🔔 *Quota Reset!* The blackout period for *{car}* has officially ended. It is ready for a fresh Day 1 cycle ({max_liters}L limit)."
+                msg = f"🔔 *Quota Reset!* The 7-day cycle for *{car}* has officially ended. It is ready for a fresh Day 1 ({max_liters}L limit)."
                 bot.send_message(GROUP_CHAT_ID, msg, parse_mode='Markdown')
 
 # Start the background scheduler
@@ -130,8 +127,8 @@ scheduler.start()
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     help_text = (
-        "🚗 *Family Fuel Tracker Bot (Phase 2)*\n"
-        "Tracking a 7-Day Active / 2-Day Blackout Cycle.\n\n"
+        "🚗 *Family Fuel Tracker Bot*\n"
+        "Tracking a 7-Day Limit Cycle.\n\n"
         "⛽ *Commands:*\n"
         "`/check` - 🚦 PRE-CHECK if a car can get petrol today.\n"
         "`/fill` - Log petrol (Interactive menu).\n"
@@ -186,18 +183,16 @@ def process_check_step(message):
         quota_status = f"✅ *Passed:* Cycle is clean! Ready for a new Day 1."
         can_fill_quota = True
         liters_left = max_liters
-    elif state["state"] == "BLACKOUT":
-        reset_str = state["reset_time"].strftime('%b %d at %I:%M %p')
-        quota_status = f"❌ *Failed:* You are in the 2-Day Blackout Period. Reset is on {reset_str}."
     else: # ACTIVE
         fills_left = 2 - state["fills"]
         liters_left = max_liters - state["liters"]
         if fills_left > 0 and liters_left > 0:
-            end_str = state["active_end"].strftime('%b %d at %I:%M %p')
-            quota_status = f"✅ *Passed:* In Active Window (closes {end_str}). You have {fills_left} fills and {liters_left}L left."
+            end_str = state["reset_time"].strftime('%b %d at %I:%M %p')
+            quota_status = f"✅ *Passed:* In Active Cycle (resets {end_str}). You have {fills_left} fills and {liters_left}L left."
             can_fill_quota = True
         else:
-            quota_status = f"❌ *Failed:* You used your allowance for this window."
+            end_str = state["reset_time"].strftime('%b %d at %I:%M %p')
+            quota_status = f"❌ *Failed:* You used your allowance for this cycle. Resets on {end_str}."
 
     # Final Verdict
     if can_fill_date and can_fill_quota:
@@ -234,13 +229,10 @@ def process_car_step(message):
 
     # Cycle Check
     state = get_car_state(car)
-    if state["state"] == "BLACKOUT":
-        bot.reply_to(message, f"🚨 *DENIED (Blackout Period):* {car}'s 7-day active window has closed. You cannot get fuel again until {state['reset_time'].strftime('%b %d')}.", parse_mode='Markdown', reply_markup=types.ReplyKeyboardRemove())
-        return
-    
     max_liters = CAR_LIMITS[car]
+    
     if state["state"] == "ACTIVE" and (state["fills"] >= 2 or state["liters"] >= max_liters):
-        bot.reply_to(message, f"🚨 *DENIED:* {car} has already maxed out its allowance for this active cycle.", parse_mode='Markdown', reply_markup=types.ReplyKeyboardRemove())
+        bot.reply_to(message, f"🚨 *DENIED:* {car} has maxed out its allowance for this cycle. Resets on {state['reset_time'].strftime('%b %d')}.", parse_mode='Markdown', reply_markup=types.ReplyKeyboardRemove())
         return
 
     chat_id = message.chat.id
@@ -249,19 +241,17 @@ def process_car_step(message):
     # Calculate remaining liters to show the right buttons
     remaining_liters = max_liters if state["state"] == "READY" else max_liters - state["liters"]
     
-    # Generate Smart Buttons!
+    # Generate Smart Buttons
     markup = types.ReplyKeyboardMarkup(row_width=3, resize_keyboard=True, one_time_keyboard=True)
     buttons = []
     
-    # Add common increments (5L, 10L, 15L, etc.) that fit within their remaining limit
     for amount in [5, 10, 15, 20, 25, 30, 35, 40]:
         if amount < remaining_liters:
             buttons.append(f"{amount}L")
             
     markup.add(*buttons)
-    # Add a massive button for the exact maximum allowance left
     markup.add(f"Full Allowance ({remaining_liters}L)")
-    markup.add("⌨️ Type Custom Amount") # Just in case the pump stops at a weird number like 17.3L
+    markup.add("⌨️ Type Custom Amount") 
 
     msg = bot.reply_to(message, f"⛽ You selected *{car}*.\n\nYou have up to *{remaining_liters}L* available.\nChoose the amount you pumped:", parse_mode='Markdown', reply_markup=markup)
     bot.register_next_step_handler(msg, process_liters_step)
@@ -282,13 +272,10 @@ def process_liters_step(message):
     # Extract the number from the button they clicked
     try:
         if "Full Allowance" in text_input:
-            # Extracts the number inside the parentheses, e.g., "Full Allowance (35.0L)" -> 35.0
             liters = float(text_input.split('(')[1].split('L')[0])
         elif "L" in text_input:
-            # Extracts "20" from "20L"
             liters = float(text_input.replace('L', ''))
         else:
-            # If they just typed a raw number
             liters = float(text_input)
     except Exception:
         bot.reply_to(message, "⚠️ Not a valid selection. Start over with /fill.", reply_markup=types.ReplyKeyboardRemove())
@@ -337,15 +324,15 @@ def check_status(message):
     status_text = "📊 *Current Fleet Status:*\n\n"
     for car, max_liters in CAR_LIMITS.items():
         state = get_car_state(car)
+        max_liters = CAR_LIMITS[car]
+        
         if state["state"] == "READY":
             status_text += f"🟢 *{car}*: READY (Day 1 Available)\n"
-        elif state["state"] == "BLACKOUT":
-            status_text += f"🔴 *{car}*: BLACKOUT (Resets {state['reset_time'].strftime('%b %d')})\n"
         else: # ACTIVE
             fills_left = 2 - state["fills"]
             liters_left = max_liters - state["liters"]
-            indicator = "🟡" if (fills_left == 0 or liters_left <= 0) else "🟢"
-            status_text += f"{indicator} *{car}*: ACTIVE ({liters_left}L left, closes {state['active_end'].strftime('%b %d')})\n"
+            indicator = "🔴" if (fills_left <= 0 or liters_left <= 0) else "🟢"
+            status_text += f"{indicator} *{car}*: ACTIVE ({liters_left}L left, resets {state['reset_time'].strftime('%b %d')})\n"
     
     bot.reply_to(message, status_text, parse_mode='Markdown')
 
@@ -395,9 +382,8 @@ def undo_last(message):
     bot.reply_to(message, f"⏪ *Undone!* Deleted your last entry: {record[2]}L for {record[1]}.", parse_mode='Markdown')
 
 # --- RUN BOT ---
-print("Fuel Tracker Bot v4 (Smart Dispatcher) is running...")
+print("Fuel Tracker Bot v5 (7-Day Cycle) is running...")
 
-# This creates the Menu Button beside the text box!
 bot.set_my_commands([
     BotCommand("check", "🚦 Pre-check if a car can get petrol"),
     BotCommand("fill", "⛽ Log a new petrol fill"),
