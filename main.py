@@ -19,8 +19,8 @@ bot = telebot.TeleBot(TOKEN)
 CAR_LIMITS = {
     "VW Blue": 35,
     "VW GRAY": 35,
-    "570": 35,
-    "Adventures": 40
+    "570": 45,
+    "Adventures": 45
 }
 
 CAR_PARITY = {
@@ -132,6 +132,7 @@ def send_welcome(message):
         "⛽ *Commands:*\n"
         "`/check` - 🚦 PRE-CHECK if a car can get petrol today.\n"
         "`/fill` - Log petrol (Interactive menu).\n"
+        "`/pastfill` - 🕰️ Log a missed record from a previous day.\n"
         "`/status` - Check all cars' cycle status.\n"
         "`/history` - See recent logs for a car.\n"
         "`/undo` - Deletes your most recent entry.\n"
@@ -139,8 +140,8 @@ def send_welcome(message):
         "*Registered Cars:*\n"
         "- VW Blue (Odd): 35L\n"
         "- VW GRAY (Odd): 35L\n"
-        "- 570 (Even): 35L\n"
-        "- Adventures (Odd): 40L"
+        "- 570 (Even): 45L\n"
+        "- Adventures (Odd): 45L"
     )
     bot.reply_to(message, help_text, parse_mode='Markdown')
 
@@ -245,7 +246,7 @@ def process_car_step(message):
     markup = types.ReplyKeyboardMarkup(row_width=3, resize_keyboard=True, one_time_keyboard=True)
     buttons = []
     
-    for amount in [5, 10, 15, 20, 25, 30, 35, 40]:
+    for amount in [5, 10, 15, 20, 25, 30, 35, 40, 45]:
         if amount < remaining_liters:
             buttons.append(f"{amount}L")
             
@@ -381,12 +382,98 @@ def undo_last(message):
     conn.commit()
     bot.reply_to(message, f"⏪ *Undone!* Deleted your last entry: {record[2]}L for {record[1]}.", parse_mode='Markdown')
 
+# --- PAST FILL COMMAND ---
+@bot.message_handler(commands=['pastfill'])
+def pastfill_start(message):
+    msg = bot.reply_to(message, "🕰️ *Log a Past Fill*\n\nPlease type the date you filled the petrol in `YYYY-MM-DD` format (e.g., `2026-06-25`):", parse_mode='Markdown')
+    bot.register_next_step_handler(msg, process_past_date)
+
+def process_past_date(message):
+    chat_id = message.chat.id
+    date_text = message.text.strip()
+    
+    try:
+        # Validate date string
+        fill_date = datetime.strptime(date_text, "%Y-%m-%d")
+        if fill_date > datetime.now():
+            bot.reply_to(message, "❌ You cannot log a future date. Start over with /pastfill.")
+            return
+    except ValueError:
+        bot.reply_to(message, "❌ Invalid date format. Please use YYYY-MM-DD. Start over with /pastfill.")
+        return
+
+    user_data[chat_id] = {'past_date': fill_date}
+    
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=True)
+    markup.add(*CAR_LIMITS.keys())
+    msg = bot.reply_to(message, f"Date set to {date_text}. 🚗 Which car did you fill?", reply_markup=markup)
+    bot.register_next_step_handler(msg, process_past_car)
+
+def process_past_car(message):
+    chat_id = message.chat.id
+    if chat_id not in user_data: return
+    
+    car = message.text
+    if car not in CAR_LIMITS:
+        bot.reply_to(message, "❌ Unrecognized car. Start over with /pastfill.", reply_markup=types.ReplyKeyboardRemove())
+        del user_data[chat_id]
+        return
+        
+    user_data[chat_id]['car'] = car
+    msg = bot.reply_to(message, f"Selected {car}. ⛽ How many liters did you pump? (e.g., `35` or `18.5`)", reply_markup=types.ReplyKeyboardRemove())
+    bot.register_next_step_handler(msg, process_past_liters)
+
+def process_past_liters(message):
+    chat_id = message.chat.id
+    if chat_id not in user_data: return
+    
+    try:
+        liters = float(message.text.replace('L', '').strip())
+    except ValueError:
+        bot.reply_to(message, "⚠️ Not a valid number. Start over with /pastfill.")
+        del user_data[chat_id]
+        return
+        
+    user_data[chat_id]['liters'] = liters
+    car = user_data[chat_id]['car']
+    past_date = user_data[chat_id]['past_date'].strftime('%Y-%m-%d')
+    
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=True)
+    markup.add('Yes ✅', 'No ❌')
+    msg = bot.reply_to(message, f"Double checking past log:\n📅 Date: {past_date}\n🚗 Car: {car}\n⛽ Liters: {liters}L\n\nCorrect?", reply_markup=markup)
+    bot.register_next_step_handler(msg, process_past_confirmation)
+
+def process_past_confirmation(message):
+    chat_id = message.chat.id
+    if chat_id not in user_data: return
+        
+    if message.text == 'Yes ✅':
+        car = user_data[chat_id]['car']
+        liters = user_data[chat_id]['liters']
+        
+        # Add an arbitrary time (12:00 PM) to the date so it stores properly as an ISO format timestamp
+        fill_datetime = user_data[chat_id]['past_date'].replace(hour=12, minute=0, second=0)
+        now_str = fill_datetime.isoformat()
+        
+        driver = message.from_user.first_name.replace('*', '').replace('_', '').replace('`', '')
+        
+        cursor.execute("INSERT INTO records (car, driver, liters, fill_date) VALUES (?, ?, ?, ?)", (car, driver, liters, now_str))
+        conn.commit()
+        
+        bot.reply_to(message, f"Data retroactively added ✅ Thanks, {driver}!", reply_markup=types.ReplyKeyboardRemove())
+    else:
+        bot.reply_to(message, "Canceled! 🛑", reply_markup=types.ReplyKeyboardRemove())
+        
+    del user_data[chat_id]
+
+
 # --- RUN BOT ---
 print("Fuel Tracker Bot v5 (7-Day Cycle) is running...")
 
 bot.set_my_commands([
     BotCommand("check", "🚦 Pre-check if a car can get petrol"),
     BotCommand("fill", "⛽ Log a new petrol fill"),
+    BotCommand("pastfill", "🕰️ Log a missed record from a previous day"),
     BotCommand("status", "📊 Check all cars' cycle status"),
     BotCommand("history", "📝 See recent logs for a car"),
     BotCommand("undo", "⏪ Delete your last entry"),
