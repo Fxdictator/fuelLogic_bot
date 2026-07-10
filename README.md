@@ -36,3 +36,39 @@ This bot is hardcoded to manage a specific **Triggered Cycle** rationing system.
 ```bash
 git clone [https://github.com/Fxdictator/FuelLogic_bot.git](https://github.com/Fxdictator/FuelLogic_bot.git)
 cd FuelLogic_bot
+```
+### 2. Set up your environment variables
+Create a file named `.env` in the same directory as your script and add the following keys:
+```bash
+BOT_TOKEN=your_telegram_bot_token_here
+ADMIN_CHAT_ID=your_personal_telegram_id
+GROUP_CHAT_ID=your_family_group_chat_id
+```
+### 3. Initialize the bot
+Run the Python script. The bot will automatically generate the `fuel_tracker.db` database file on its first run.
+```bash
+python fuel_bot.py
+```
+
+---
+
+## 📱 Bot Commands
+* `/check` - 🚦 Run a pre-check to see if a car clears both the Odd/Even date rule and the 7-Day limit rule today.
+
+* `/fill` - ⛽ Opens the interactive menu to log a new petrol station visit.
+
+* `/status` - 📊 Displays a dashboard of all cars, showing their current state (READY or ACTIVE), remaining fills, and remaining liters.
+
+* `/history` - 📝 Pulls the last 5 database logs for a specific vehicle.
+
+* `/undo` - ⏪ Instantly deletes the user's most recent entry (useful for typos).
+
+---
+
+## 🗄️ Database Structure
+The bot uses SQLite3 with a single table (records) to maintain the ledger.
+
+`id` : Primary Key
+`car` : Vehicle Name
+`liters` : Amount of fuel logged
+`fill_date` : ISO Format Timestamp
